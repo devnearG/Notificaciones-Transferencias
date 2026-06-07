@@ -1,210 +1,180 @@
 const express = require('express');
 const axios = require('axios');
 const { simpleParser } = require('mailparser');
+const { JSDOM } = require('jsdom');
 require('dotenv').config({ path: '../config/.env' });
 
 const app = express();
 app.use(express.json());
 app.use(express.raw({ type: 'message/rfc822', limit: '10mb' }));
-app.use(express.text({ type: 'text/plain', limit: '10mb' }));
+app.use(express.text({ type: ['text/plain', 'text/html'], limit: '10mb' }));
 
-// ─── Parser del email de BancoEstado ─────────────────────────────────────────
+// ─── Validación de token secreto ─────────────────────────────────────────────
 
-function parsearEmailBancoEstado(textoPlano) {
-  const resultado = {
-    fecha: null,
-    hora: null,
-    remitente: null,
-    monto: null,
-    numeroOperacion: null,
-    comentario: null,
-    valido: false,
-  };
-
-  // Verifica que sea un email de BancoEstado TEF
-  if (!textoPlano.includes('Transferencia Electronica de Fondos')) {
-    return resultado;
+function validarToken(req, res, next) {
+  const token = req.headers['x-webhook-secret'];
+  if (!token || token !== process.env.WEBHOOK_SECRET) {
+    console.log('⛔ Acceso rechazado - token inválido');
+    return res.status(401).json({ error: 'No autorizado' });
   }
+  next();
+}
 
-  // Fecha y hora: "hoy 27/04/2025 20:19:51"
-  const fechaMatch = textoPlano.match(
-    /hoy\s+(\d{2}\/\d{2}\/\d{4})\s+(\d{2}:\d{2}:\d{2})/i
-  );
-  if (fechaMatch) {
-    resultado.fecha = fechaMatch[1];
-    resultado.hora = fechaMatch[2];
+// ─── Parser BancoEstado (texto plano) ────────────────────────────────────────
+
+function parsearBancoEstado(texto) {
+  const r = { banco: 'BancoEstado', fecha: null, hora: null, remitente: null, monto: null, numeroOperacion: null, comentario: null, valido: false };
+  if (!texto.includes('Transferencia Electronica de Fondos')) return r;
+  const fechaM = texto.match(/hoy\s+(\d{2}\/\d{2}\/\d{4})\s+(\d{2}:\d{2}:\d{2})/i);
+  if (fechaM) { r.fecha = fechaM[1]; r.hora = fechaM[2]; }
+  const remM = texto.match(/de nuestro\(a\) cliente\s+(.+?),\s+con los siguientes datos/i);
+  if (remM) r.remitente = remM[1].trim();
+  const montoM = texto.match(/Monto transferido:\s*\n\s*(\$[\d.]+)/i);
+  if (montoM) r.monto = montoM[1].trim();
+  const opM = texto.match(/N[uú]mero de Operaci[oó]n[:\s]+(\d+)/i);
+  if (opM) r.numeroOperacion = opM[1].trim();
+  const comM = texto.match(/Comentario[:\s]+(.+?)(?:\n|$)/i);
+  if (comM) r.comentario = comM[1].trim();
+  r.valido = !!(r.monto && r.fecha);
+  return r;
+}
+
+// ─── Parser Banco de Chile (HTML) ────────────────────────────────────────────
+
+function parsearBancoChile(html) {
+  const r = { banco: 'Banco de Chile', fecha: null, hora: null, remitente: null, monto: null, numeroOperacion: null, comentario: null, valido: false };
+  if (!html.includes('bancochile')) return r;
+  try {
+    const dom = new JSDOM(html);
+    const texto = dom.window.document.body.textContent;
+    const remM = html.match(/cliente <b>([^<]+)<\/b> ha efectuado/i);
+    if (remM) r.remitente = remM[1].trim();
+    const montoM = texto.match(/\$[\d.,]+/g);
+    if (montoM) r.monto = montoM[0].trim();
+    const fechaM = texto.match(/(\d{2}\/\d{2}\/\d{4})/);
+    if (fechaM) r.fecha = fechaM[1];
+    const horaM = texto.match(/\d{4}\s+(\d{2}:\d{2})/);
+    if (horaM) r.hora = horaM[1];
+    const txM = texto.match(/TEF[A-Z0-9]{20,}/);
+    if (txM) r.numeroOperacion = txM[0].trim();
+    r.valido = !!(r.monto && r.fecha);
+  } catch (e) {
+    console.error('Error parseando Banco de Chile:', e.message);
   }
+  return r;
+}
 
-  // Remitente: "de nuestro(a) cliente NOMBRE, con"
-  const remitenteMatch = textoPlano.match(
-    /de nuestro\(a\) cliente\s+(.+?),\s+con los siguientes datos/i
-  );
-  if (remitenteMatch) {
-    resultado.remitente = remitenteMatch[1].trim();
-  }
+// ─── Detectar banco y parsear ─────────────────────────────────────────────────
 
-  // Monto: "$50.000"
-  const montoMatch = textoPlano.match(/Monto transferido:\s*\n\s*(\$[\d.]+)/i);
-  if (montoMatch) {
-    resultado.monto = montoMatch[1].trim();
-  }
-
-  // Número de operación
-  const opMatch = textoPlano.match(/N[uú]mero de Operaci[oó]n[:\s]+(\d+)/i);
-  if (opMatch) {
-    resultado.numeroOperacion = opMatch[1].trim();
-  }
-
-  // Comentario
-  const comentMatch = textoPlano.match(/Comentario[:\s]+(.+?)(?:\n|$)/i);
-  if (comentMatch) {
-    resultado.comentario = comentMatch[1].trim();
-  }
-
-  // Solo es válido si tenemos los campos mínimos
-  resultado.valido = !!(resultado.monto && resultado.remitente && resultado.fecha);
-  return resultado;
+function parsearEmail(contenido) {
+  if (contenido.includes('Transferencia Electronica de Fondos')) return parsearBancoEstado(contenido);
+  if (contenido.includes('bancochile')) return parsearBancoChile(contenido);
+  return { valido: false };
 }
 
 // ─── Formatear mensaje WhatsApp ───────────────────────────────────────────────
 
-function formatearMensajeWhatsApp(datos) {
-  const comentario =
-    datos.comentario && datos.comentario !== 'Sin mensaje'
-      ? `\n💬 *Mensaje:* ${datos.comentario}`
-      : '';
-
-  const operacion = datos.numeroOperacion
-    ? `\n🔢 *N° Operación:* ${datos.numeroOperacion}`
-    : '';
-
+function formatearMensaje(d) {
+  const comentario = d.comentario && d.comentario !== 'Sin mensaje' ? `\n💬 *Mensaje:* ${d.comentario}` : '';
+  const operacion = d.numeroOperacion ? `\n🔢 *N° Comprobante:* ${d.numeroOperacion}` : '';
+  const remitente = d.remitente ? `\n👤 *De:*  ${d.remitente}` : '';
   return `✅ *¡TRANSFERENCIA RECIBIDA!*
 ━━━━━━━━━━━━━━━━━
 
-💰 *Monto:*  ${datos.monto}
+💰 *Monto:*  ${d.monto}
+${remitente}
+🏦 *Banco:*  ${d.banco}
 
-👤 *De:*  ${datos.remitente}
+📅 *Fecha:*  ${d.fecha}
 
-📅 *Fecha:*  ${datos.fecha}
-
-🕐 *Hora:*  ${datos.hora} hrs${operacion}${comentario}
+🕐 *Hora:*  ${d.hora} hrs${operacion}${comentario}
 
 ━━━━━━━━━━━━━━━━━
 _Notificación automática · Sanguichería_`.trim();
 }
 
-// ─── Enviar mensaje por Evolution API ────────────────────────────────────────
+// ─── Enviar WhatsApp ──────────────────────────────────────────────────────────
 
 async function enviarWhatsApp(numero, mensaje) {
   const url = `${process.env.EVOLUTION_URL}/message/sendText/${process.env.EVOLUTION_INSTANCE}`;
-
-  const response = await axios.post(
-    url,
-    { number: numero, text: mensaje },
-    {
-      headers: {
-        apikey: process.env.EVOLUTION_API_KEY,
-        'Content-Type': 'application/json',
-      },
-      timeout: 10000,
-    }
-  );
-
+  const response = await axios.post(url, { number: numero, text: mensaje }, {
+    headers: { apikey: process.env.EVOLUTION_API_KEY, 'Content-Type': 'application/json' },
+    timeout: 10000,
+  });
   return response.data;
 }
 
-// ─── Webhook principal (recibe el email desde Mailparser o Make) ──────────────
+// ─── Webhook (protegido con token) ───────────────────────────────────────────
 
-app.post('/webhook/email', async (req, res) => {
+app.post('/webhook/email', validarToken, async (req, res) => {
   try {
-    let textoPlano = '';
-
-    // Acepta tanto texto plano directo como .eml completo
+    let contenido = '';
     if (typeof req.body === 'string') {
-      textoPlano = req.body;
+      contenido = req.body;
     } else if (Buffer.isBuffer(req.body)) {
       const parsed = await simpleParser(req.body);
-      textoPlano = parsed.text || '';
-    } else if (req.body && req.body.text) {
-      // JSON desde Mailparser.io o Make
-      textoPlano = req.body.text;
+      contenido = parsed.html || parsed.text || '';
+    } else if (req.body?.html) {
+      contenido = req.body.html;
+    } else if (req.body?.text) {
+      contenido = req.body.text;
     }
 
-    if (!textoPlano) {
-      return res.status(400).json({ error: 'No se recibió contenido de email' });
-    }
+    if (!contenido) return res.status(400).json({ error: 'Sin contenido' });
 
-    const datos = parsearEmailBancoEstado(textoPlano);
-
+    const datos = parsearEmail(contenido);
     if (!datos.valido) {
-      console.log('Email recibido pero no es una TEF de BancoEstado, ignorando.');
-      return res.status(200).json({ status: 'ignorado', razon: 'no es TEF BancoEstado' });
+      console.log('Email ignorado, no es transferencia reconocida.');
+      return res.status(200).json({ status: 'ignorado' });
     }
 
     console.log('✅ Transferencia detectada:', datos);
-
-    const mensaje = formatearMensajeWhatsApp(datos);
-
-    // Enviar al número de papá (y opcionalmente a abuela)
+    const mensaje = formatearMensaje(datos);
     const numeros = process.env.WHATSAPP_NUMEROS.split(',').map(n => n.trim());
-
     for (const numero of numeros) {
       await enviarWhatsApp(numero, mensaje);
-      console.log(`📲 Mensaje enviado a ${numero}`);
+      console.log(`📲 Enviado a ${numero}`);
     }
-
-    return res.status(200).json({
-      status: 'ok',
-      transferencia: datos,
-      destinatarios: numeros.length,
-    });
-
+    return res.status(200).json({ status: 'ok', transferencia: datos });
   } catch (error) {
-    console.error('❌ Error en webhook:', error.message);
+    console.error('❌ Error:', error.message);
     return res.status(500).json({ error: error.message });
   }
 });
 
-// ─── Health check (para Railway/Render) ──────────────────────────────────────
+// ─── Health (público) ─────────────────────────────────────────────────────────
 
 app.get('/health', (req, res) => {
-  res.json({
-    status: 'ok',
-    servicio: 'Sanguichería · Notificaciones',
-    timestamp: new Date().toISOString(),
-  });
+  res.json({ status: 'ok', servicio: 'Sanguichería · Notificaciones', timestamp: new Date().toISOString() });
 });
 
-// ─── Endpoint de prueba manual ────────────────────────────────────────────────
+// ─── Test (protegido con token) ───────────────────────────────────────────────
 
-app.post('/test', async (req, res) => {
-  const datosPrueba = {
-    fecha: '03/06/2026',
-    hora: '14:32:00',
-    remitente: 'Cliente Prueba',
-    monto: '$5.500',
-    numeroOperacion: '1234567',
-    comentario: 'Sandwich completo',
+app.post('/test', validarToken, async (req, res) => {
+  const datos = {
+    banco: 'BancoEstado',
+    fecha: '27/04/2025',
+    hora: '20:19:51',
+    remitente: 'Marta Elena',
+    monto: '$50.000',
+    numeroOperacion: '8017800',
+    comentario: null,
     valido: true,
   };
-
-  const mensaje = formatearMensajeWhatsApp(datosPrueba);
-
+  const mensaje = formatearMensaje(datos);
   try {
     const numeros = process.env.WHATSAPP_NUMEROS.split(',').map(n => n.trim());
-    for (const numero of numeros) {
-      await enviarWhatsApp(numero, mensaje);
-    }
+    for (const numero of numeros) await enviarWhatsApp(numero, mensaje);
     res.json({ status: 'ok', mensaje });
   } catch (error) {
     res.status(500).json({ error: error.message, mensaje });
   }
 });
 
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
   console.log(`🚀 Servidor corriendo en puerto ${PORT}`);
-  console.log(`📧 Webhook: POST /webhook/email`);
-  console.log(`🏥 Health:  GET  /health`);
-  console.log(`🧪 Test:    POST /test`);
+  console.log(`📧 Webhook: POST /webhook/email (protegido)`);
+  console.log(`🏥 Health:  GET  /health (público)`);
+  console.log(`🧪 Test:    POST /test (protegido)`);
 });
