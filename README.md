@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Sanguichería · Sistema de Notificaciones
 
 Detecta transferencias recibidas en BancoEstado y envía un comprobante
@@ -130,3 +131,6 @@ sanguicheria/
 ├── package.json
 └── README.md
 ```
+=======
+# Notificaciones-Transferencias
+>>>>>>> 05e7389b107bcbf8c7bc95c1b84a646e6a38523f
