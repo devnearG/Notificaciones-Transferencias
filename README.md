@@ -1,136 +1,43 @@
-<<<<<<< HEAD
-# Sanguichería · Sistema de Notificaciones
+# 🏦 Sistema de Notificaciones · BancoEstado
 
-Detecta transferencias recibidas en BancoEstado y envía un comprobante
-formateado al WhatsApp de papá/abuela en tiempo real.
+Servicio backend diseñado para detectar de forma automatizada las transferencias recibidas en **BancoEstado** (Chile) y enviar un comprobante formateado a través de **WhatsApp** en tiempo real.
 
 ---
 
-## Cómo funciona
+## 🧭 ¿Cómo funciona?
 
-```
-Email BancoEstado → Gmail de papá → Reenvío automático → Mailparser.io
-→ Webhook (este servidor) → Parser extrae datos → Evolution API → WhatsApp ✅
-```
+El sistema opera mediante una cadena de integración continua basada en eventos:
 
----
-
-## Paso 1 · Configurar reenvío de Gmail
-
-1. Abre Gmail de papá → Configuración → "Ver toda la configuración"
-2. Ve a la pestaña **Filtros y direcciones bloqueadas**
-3. Crea un filtro:
-   - **De:** `noreply@correo.bancoestado.cl`
-   - **Asunto:** `Aviso de envío o recepción de dinero`
-4. Acción: **Reenviar a** → (la dirección que da Mailparser en el paso 2)
+1. **Recepción:** El correo de notificación de BancoEstado llega alfanuméricamente a una bandeja de entrada.
+2. **Procesamiento (Parsing):** Un servicio externo analiza el correo electrónico (cuerpo de texto plano) para extraer los datos clave de la transferencia (monto, emisor, fecha, hora, número de operación y glosa).
+3. **Webhook:** El parser envía los datos extraídos mediante una petición HTTP POST a este servidor.
+4. **Notificación:** El servidor procesa la información y utiliza una instancia de **Evolution API** para despachar una alerta estructurada directamente a uno o más números de WhatsApp autorizados.
 
 ---
 
-## Paso 2 · Configurar Mailparser.io
+## 🔒 Consideraciones de Seguridad y Privacidad
 
-1. Crea cuenta gratuita en https://mailparser.io
-2. Crea una nueva "Mailbox" → copia la dirección de email que te da
-3. Pega esa dirección en el filtro de Gmail del paso 1
-4. En Mailparser, configura el Webhook:
-   - URL: `https://TU-APP.railway.app/webhook/email`
-   - Formato: **Text body** (texto plano del email)
-   - Method: POST
+* **Variables de Entorno:** Las credenciales sensibles (tokens de Evolution API, URLs de servidores y lista de números permitidos) se gestionan exclusivamente mediante variables de entorno (`.env`), evitando su exposición en el código fuente.
+* **Control de Destinatarios:** El sistema valida los números receptores definidos en la configuración para restringir el envío de información financiera sensible únicamente a los contactos autorizados.
 
 ---
 
-## Paso 3 · Desplegar Evolution API en Railway
+## 📊 Requisitos del Sistema (Stack Tecnológico)
 
-1. Ve a https://railway.app → New Project → "Deploy from template"
-2. Busca **"Evolution API"** → Deploy
-3. Una vez desplegado, abre la URL de tu app
-4. Ve a `/manager` → crea una instancia llamada `sanguicheria`
-5. Escanea el QR con el WhatsApp de papá (solo una vez)
-6. Copia la API Key desde la configuración
+* **Runtime:** Node.js
+* **Procesamiento de Correo:** Mailparser.io (o equivalente)
+* **Pasarela de Mensajería:** Evolution API (Auto-hospedado)
+* **Hosting / Despliegue:** Railway (o cualquier proveedor compatible con Node.js y Webhooks)
 
 ---
 
-## Paso 4 · Desplegar este servidor en Railway
+## 📁 Estructura del Proyecto
 
-1. Sube este proyecto a GitHub (repositorio privado)
-2. En Railway → New Project → "Deploy from GitHub repo"
-3. Selecciona el repositorio
-4. Ve a Variables de entorno y agrega:
-
-```
-EVOLUTION_URL      = https://tu-evolution.railway.app
-EVOLUTION_INSTANCE = sanguicheria
-EVOLUTION_API_KEY  = tu-api-key
-WHATSAPP_NUMEROS   = 56912345678
-PORT               = 3000
-```
-
-5. Railway despliega automáticamente → copia la URL pública
-
----
-
-## Paso 5 · Probar el sistema
-
-Usa el endpoint de prueba para verificar que todo funciona antes
-de recibir una transferencia real:
-
-```bash
-curl -X POST https://TU-APP.railway.app/test
-```
-
-Deberías recibir en WhatsApp:
-
-```
-✅ ¡TRANSFERENCIA RECIBIDA!
-━━━━━━━━━━━━━━━━━
-
-💰 Monto:  $5.500
-👤 De:  Cliente Prueba
-📅 Fecha:  03/06/2026
-🕐 Hora:  14:32:00 hrs
-🔢 N° Operación: 1234567
-💬 Mensaje: Sandwich completo
-
-━━━━━━━━━━━━━━━━━
-Notificación automática · Sanguichería
-```
-
----
-
-## Agregar la abuela
-
-En el archivo `.env`, agrega su número separado por coma:
-
-```
-WHATSAPP_NUMEROS=56912345678,56987654321
-```
-
----
-
-## Costos
-
-| Servicio       | Plan          | Costo      |
-|----------------|---------------|------------|
-| Railway        | Hobby (5$/mes) o Free trial | ~$0–5/mes |
-| Mailparser.io  | Free (30 emails/mes) | $0         |
-| Evolution API  | Auto-hospedado | $0         |
-| **Total**      |               | **~$0–5/mes** |
-
-> Para más de 30 transferencias al mes en Mailparser, usar el plan Starter ($9/mes)
-> o reemplazar Mailparser por el módulo de email directo de Make (gratuito).
-
----
-
-## Estructura del proyecto
-
-```
-sanguicheria/
+```text
+notificaciones-bancoestado/
 ├── src/
-│   └── index.js          ← Servidor principal
+│   └── index.js         ← Servidor principal, manejo de endpoints y lógica de formateo
 ├── config/
-│   └── .env.example      ← Variables de entorno (copiar a .env)
+│   └── .env.example     ← Plantilla de variables de entorno requeridas
 ├── package.json
 └── README.md
-```
-=======
-# Notificaciones-Transferencias
->>>>>>> 05e7389b107bcbf8c7bc95c1b84a646e6a38523f
